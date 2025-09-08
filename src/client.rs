@@ -2,14 +2,12 @@
 //!
 //! This module provides the client for communicating with the PR server
 
-use crate::server::{Request, Response};
 use serde_json::Value;
 use std::net::SocketAddr;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tracing::{debug, error};
-use uuid::Uuid;
 
 #[derive(Error, Debug)]
 pub enum ClientError {
@@ -48,26 +46,44 @@ impl PrClient {
         let stream = TcpStream::connect(addr).await?;
         debug!("Connected to PR server at {}", addr);
 
-        let (read_half, write_half) = stream.into_split();
+        let (read_half, mut write_half) = stream.into_split();
         let reader = BufReader::new(read_half);
+
+        // Send handshake
+        write_half.write_all(b"PRSERVICE 1.0\n").await?;
+        write_half.flush().await?;
 
         self.reader = Some(reader);
         self.writer = Some(write_half);
 
-        // Read the initial handshake response
-        let response = self.read_response().await?;
-        debug!("Handshake response: {:?}", response);
+        // Read the handshake response
+        let response = self.read_line().await?;
+        debug!("Handshake response: {}", response);
+
+        if !response.starts_with("PRSERVICE") {
+            return Err(ClientError::Protocol(format!(
+                "Invalid handshake response: {response}"
+            )));
+        }
+
+        // Send configuration
+        if let Some(writer) = &mut self.writer {
+            writer.write_all(b"needs-headers: false\n").await?;
+            writer.flush().await?;
+        }
+
+        // Read configuration response
+        let config_response = self.read_line().await?;
+        debug!("Config response: {}", config_response);
 
         Ok(())
     }
 
     /// Send a request and get the response
     async fn send_request(&mut self, method: &str, params: Value) -> Result<Value> {
-        let request = Request {
-            id: Some(Uuid::new_v4().to_string()),
-            method: method.to_string(),
-            params,
-        };
+        let request = serde_json::json!({
+            method: params
+        });
 
         let request_json = serde_json::to_string(&request)?;
         debug!("Sending request: {}", request_json);
@@ -80,19 +96,19 @@ impl PrClient {
             return Err(ClientError::Protocol("Not connected".to_string()));
         }
 
-        let response = self.read_response().await?;
+        let response_line = self.read_line().await?;
+        debug!("Received response: {}", response_line);
 
-        if let Some(error) = response.error {
-            return Err(ClientError::Server(error));
+        if response_line.starts_with("ERROR:") {
+            return Err(ClientError::Server(response_line));
         }
 
-        response
-            .result
-            .ok_or_else(|| ClientError::Protocol("No result in response".to_string()))
+        let response: Value = serde_json::from_str(&response_line)?;
+        Ok(response)
     }
 
-    /// Read a response from the server
-    async fn read_response(&mut self) -> Result<Response> {
+    /// Read a line from the server
+    async fn read_line(&mut self) -> Result<String> {
         let mut line = String::new();
 
         if let Some(reader) = &mut self.reader {
@@ -101,11 +117,7 @@ impl PrClient {
             return Err(ClientError::Protocol("Not connected".to_string()));
         }
 
-        let line = line.trim();
-        debug!("Received response: {}", line);
-
-        let response: Response = serde_json::from_str(line)?;
-        Ok(response)
+        Ok(line.trim().to_string())
     }
 
     /// Get a PR value (creates if doesn't exist)

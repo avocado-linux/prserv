@@ -4,7 +4,6 @@
 //! with immediate SQLite persistence for reliability.
 
 use crate::database::{DatabaseError, PrDatabase, PrTable};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -31,23 +30,11 @@ pub enum ServerError {
 
 pub type Result<T> = std::result::Result<T, ServerError>;
 
-/// Protocol version
-const PROTOCOL_VERSION: (u32, u32) = (1, 0);
-
-/// Request message structure
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Request {
-    pub id: Option<String>,
-    pub method: String,
-    pub params: serde_json::Value,
-}
-
-/// Response message structure
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Response {
-    pub id: Option<String>,
-    pub result: Option<serde_json::Value>,
-    pub error: Option<String>,
+/// Connection state for BitBake asyncrpc protocol
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectionState {
+    WaitingForHandshake, // Waiting for PRSERVICE 1.0 handshake
+    Ready,               // Ready to handle JSON requests
 }
 
 /// PR Server configuration
@@ -143,20 +130,8 @@ impl PrServer {
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         let mut line = String::new();
-
-        // Protocol handshake
-        self.send_response(
-            &mut write_half,
-            Response {
-                id: None,
-                result: Some(serde_json::json!({
-                    "protocol": "PRSERVICE",
-                    "version": PROTOCOL_VERSION
-                })),
-                error: None,
-            },
-        )
-        .await?;
+        // Start waiting for BitBake asyncrpc handshake
+        let mut connection_state = ConnectionState::WaitingForHandshake;
 
         loop {
             line.clear();
@@ -167,24 +142,58 @@ impl PrServer {
                 }
                 _ => {
                     let line = line.trim();
-                    if line.is_empty() {
-                        continue;
-                    }
+                    debug!("Received from {}: '{}'", addr, line);
 
-                    debug!("Received from {}: {}", addr, line);
-
-                    match self.process_request(line).await {
-                        Ok(response) => {
-                            self.send_response(&mut write_half, response).await?;
+                    match connection_state {
+                        ConnectionState::WaitingForHandshake => {
+                            if line.starts_with("PRSERVICE") {
+                                debug!("Received BitBake asyncrpc handshake from {}", addr);
+                                // BitBake asyncrpc server does NOT respond to PRSERVICE 1.0
+                                continue;
+                            } else if line.starts_with("needs-headers:") {
+                                debug!("Received needs-headers from {}", addr);
+                                // BitBake asyncrpc protocol - no response needed for needs-headers
+                                continue;
+                            } else if line.is_empty() {
+                                debug!("Handshake complete for {}, ready for JSON requests", addr);
+                                connection_state = ConnectionState::Ready;
+                                continue;
+                            } else {
+                                return Err(ServerError::InvalidRequest(format!(
+                                    "Unexpected handshake message: {line}"
+                                )));
+                            }
                         }
-                        Err(e) => {
-                            error!("Error processing request from {}: {}", addr, e);
-                            let error_response = Response {
-                                id: None,
-                                result: None,
-                                error: Some(e.to_string()),
-                            };
-                            self.send_response(&mut write_half, error_response).await?;
+                        ConnectionState::Ready => {
+                            // Skip empty lines in ready state
+                            if line.is_empty() {
+                                continue;
+                            }
+
+                            // Handle BitBake asyncrpc JSON requests
+                            match self.process_bitbake_request(line).await {
+                                Ok(response) => {
+                                    debug!(
+                                        "Sending BitBake asyncrpc response to {}: {}",
+                                        addr, response
+                                    );
+                                    // Send response with newline as a single write to avoid packet fragmentation
+                                    let response_with_newline = format!("{response}\n");
+                                    write_half
+                                        .write_all(response_with_newline.as_bytes())
+                                        .await?;
+                                    write_half.flush().await?;
+                                }
+                                Err(e) => {
+                                    error!(
+                                        "Error processing BitBake asyncrpc request from {}: {}",
+                                        addr, e
+                                    );
+                                    let error_response = "{\"error\":\"invalid request\"}\n";
+                                    write_half.write_all(error_response.as_bytes()).await?;
+                                    write_half.flush().await?;
+                                }
+                            }
                         }
                     }
                 }
@@ -194,175 +203,208 @@ impl PrServer {
         Ok(())
     }
 
-    /// Process a JSON-RPC style request
-    async fn process_request(&self, request_line: &str) -> Result<Response> {
-        let request: Request = serde_json::from_str(request_line)?;
+    /// Process a BitBake asyncrpc JSON request
+    async fn process_bitbake_request(&self, request_line: &str) -> Result<String> {
+        // Try to parse as JSON
+        if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(request_line) {
+            if let Some(obj) = json_value.as_object() {
+                // Handle ping request
+                if obj.contains_key("ping") {
+                    return Ok(serde_json::to_string(&serde_json::json!({"alive": true}))?);
+                }
 
-        debug!("Processing method: {}", request.method);
+                // Handle get-pr request
+                if let Some(get_pr) = obj.get("get-pr") {
+                    if let Some(params) = get_pr.as_object() {
+                        let version =
+                            params
+                                .get("version")
+                                .and_then(|v| v.as_str())
+                                .ok_or_else(|| {
+                                    ServerError::InvalidRequest("Missing version".to_string())
+                                })?;
+                        let pkgarch =
+                            params
+                                .get("pkgarch")
+                                .and_then(|v| v.as_str())
+                                .ok_or_else(|| {
+                                    ServerError::InvalidRequest("Missing pkgarch".to_string())
+                                })?;
+                        let checksum =
+                            params
+                                .get("checksum")
+                                .and_then(|v| v.as_str())
+                                .ok_or_else(|| {
+                                    ServerError::InvalidRequest("Missing checksum".to_string())
+                                })?;
 
-        let result = match request.method.as_str() {
-            "get-pr" => self.handle_get_pr(request.params).await?,
-            "test-pr" => self.handle_test_pr(request.params).await?,
-            "test-package" => self.handle_test_package(request.params).await?,
-            "max-package-pr" => self.handle_max_package_pr(request.params).await?,
-            "import-one" => self.handle_import_one(request.params).await?,
-            "export" => self.handle_export(request.params).await?,
-            "is-readonly" => self.handle_is_readonly().await?,
-            "ping" => serde_json::json!({"pong": true}),
-            _ => {
-                return Ok(Response {
-                    id: request.id,
-                    result: None,
-                    error: Some(format!("Unknown method: {}", request.method)),
-                });
+                        let table = self.get_table("PRMAIN").await?;
+                        let value = table.get_value(version, pkgarch, checksum).await?;
+                        return Ok(serde_json::to_string(&serde_json::json!({"value": value}))?);
+                    }
+                }
+
+                // Handle test-pr request
+                if let Some(test_pr) = obj.get("test-pr") {
+                    if let Some(params) = test_pr.as_object() {
+                        let version =
+                            params
+                                .get("version")
+                                .and_then(|v| v.as_str())
+                                .ok_or_else(|| {
+                                    ServerError::InvalidRequest("Missing version".to_string())
+                                })?;
+                        let pkgarch =
+                            params
+                                .get("pkgarch")
+                                .and_then(|v| v.as_str())
+                                .ok_or_else(|| {
+                                    ServerError::InvalidRequest("Missing pkgarch".to_string())
+                                })?;
+                        let checksum =
+                            params
+                                .get("checksum")
+                                .and_then(|v| v.as_str())
+                                .ok_or_else(|| {
+                                    ServerError::InvalidRequest("Missing checksum".to_string())
+                                })?;
+
+                        let table = self.get_table("PRMAIN").await?;
+                        let value = table.find_value(version, pkgarch, checksum).await?;
+                        return Ok(serde_json::to_string(&serde_json::json!({"value": value}))?);
+                    }
+                }
+
+                // Handle test-package request
+                if let Some(test_package) = obj.get("test-package") {
+                    if let Some(params) = test_package.as_object() {
+                        let version =
+                            params
+                                .get("version")
+                                .and_then(|v| v.as_str())
+                                .ok_or_else(|| {
+                                    ServerError::InvalidRequest("Missing version".to_string())
+                                })?;
+                        let pkgarch =
+                            params
+                                .get("pkgarch")
+                                .and_then(|v| v.as_str())
+                                .ok_or_else(|| {
+                                    ServerError::InvalidRequest("Missing pkgarch".to_string())
+                                })?;
+
+                        let table = self.get_table("PRMAIN").await?;
+                        let exists = table.test_package(version, pkgarch).await?;
+                        return Ok(serde_json::to_string(
+                            &serde_json::json!({"value": exists}),
+                        )?);
+                    }
+                }
+
+                // Handle max-package-pr request
+                if let Some(max_package_pr) = obj.get("max-package-pr") {
+                    if let Some(params) = max_package_pr.as_object() {
+                        let version =
+                            params
+                                .get("version")
+                                .and_then(|v| v.as_str())
+                                .ok_or_else(|| {
+                                    ServerError::InvalidRequest("Missing version".to_string())
+                                })?;
+                        let pkgarch =
+                            params
+                                .get("pkgarch")
+                                .and_then(|v| v.as_str())
+                                .ok_or_else(|| {
+                                    ServerError::InvalidRequest("Missing pkgarch".to_string())
+                                })?;
+
+                        let table = self.get_table("PRMAIN").await?;
+                        let value = table.find_max_value(version, pkgarch).await?;
+                        return Ok(serde_json::to_string(&serde_json::json!({"value": value}))?);
+                    }
+                }
+
+                // Handle import-one request
+                if let Some(import_one) = obj.get("import-one") {
+                    if let Some(params) = import_one.as_object() {
+                        if self.config.read_only {
+                            return Ok(serde_json::to_string(&serde_json::json!({"value": null}))?);
+                        }
+
+                        let version =
+                            params
+                                .get("version")
+                                .and_then(|v| v.as_str())
+                                .ok_or_else(|| {
+                                    ServerError::InvalidRequest("Missing version".to_string())
+                                })?;
+                        let pkgarch =
+                            params
+                                .get("pkgarch")
+                                .and_then(|v| v.as_str())
+                                .ok_or_else(|| {
+                                    ServerError::InvalidRequest("Missing pkgarch".to_string())
+                                })?;
+                        let checksum =
+                            params
+                                .get("checksum")
+                                .and_then(|v| v.as_str())
+                                .ok_or_else(|| {
+                                    ServerError::InvalidRequest("Missing checksum".to_string())
+                                })?;
+                        let value =
+                            params
+                                .get("value")
+                                .and_then(|v| v.as_i64())
+                                .ok_or_else(|| {
+                                    ServerError::InvalidRequest(
+                                        "Missing or invalid value".to_string(),
+                                    )
+                                })?;
+
+                        let table = self.get_table("PRMAIN").await?;
+                        let result = table.import_one(version, pkgarch, checksum, value).await?;
+                        return Ok(serde_json::to_string(
+                            &serde_json::json!({"value": result}),
+                        )?);
+                    }
+                }
+
+                // Handle export request
+                if let Some(export) = obj.get("export") {
+                    if let Some(params) = export.as_object() {
+                        let version = params.get("version").and_then(|v| v.as_str());
+                        let pkgarch = params.get("pkgarch").and_then(|v| v.as_str());
+                        let checksum = params.get("checksum").and_then(|v| v.as_str());
+                        let colinfo = params
+                            .get("colinfo")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+
+                        let table = self.get_table("PRMAIN").await?;
+                        let (metainfo, datainfo) =
+                            table.export(version, pkgarch, checksum, colinfo).await?;
+
+                        return Ok(serde_json::to_string(&serde_json::json!({
+                            "metainfo": metainfo,
+                            "datainfo": datainfo
+                        }))?);
+                    }
+                }
+
+                // Handle is-readonly request
+                if obj.contains_key("is-readonly") {
+                    return Ok(serde_json::to_string(
+                        &serde_json::json!({"readonly": self.config.read_only}),
+                    )?);
+                }
             }
-        };
-
-        Ok(Response {
-            id: request.id,
-            result: Some(result),
-            error: None,
-        })
-    }
-
-    /// Send a response to the client
-    async fn send_response(
-        &self,
-        writer: &mut tokio::net::tcp::OwnedWriteHalf,
-        response: Response,
-    ) -> Result<()> {
-        let response_json = serde_json::to_string(&response)?;
-        writer.write_all(response_json.as_bytes()).await?;
-        writer.write_all(b"\n").await?;
-        writer.flush().await?;
-        Ok(())
-    }
-
-    /// Handle get-pr request
-    async fn handle_get_pr(&self, params: serde_json::Value) -> Result<serde_json::Value> {
-        let version: String = params["version"]
-            .as_str()
-            .ok_or_else(|| ServerError::InvalidRequest("Missing version".to_string()))?
-            .to_string();
-        let pkgarch: String = params["pkgarch"]
-            .as_str()
-            .ok_or_else(|| ServerError::InvalidRequest("Missing pkgarch".to_string()))?
-            .to_string();
-        let checksum: String = params["checksum"]
-            .as_str()
-            .ok_or_else(|| ServerError::InvalidRequest("Missing checksum".to_string()))?
-            .to_string();
-
-        let table = self.get_table("PRMAIN").await?;
-        let value = table.get_value(&version, &pkgarch, &checksum).await?;
-
-        Ok(serde_json::json!({"value": value}))
-    }
-
-    /// Handle test-pr request
-    async fn handle_test_pr(&self, params: serde_json::Value) -> Result<serde_json::Value> {
-        let version: String = params["version"]
-            .as_str()
-            .ok_or_else(|| ServerError::InvalidRequest("Missing version".to_string()))?
-            .to_string();
-        let pkgarch: String = params["pkgarch"]
-            .as_str()
-            .ok_or_else(|| ServerError::InvalidRequest("Missing pkgarch".to_string()))?
-            .to_string();
-        let checksum: String = params["checksum"]
-            .as_str()
-            .ok_or_else(|| ServerError::InvalidRequest("Missing checksum".to_string()))?
-            .to_string();
-
-        let table = self.get_table("PRMAIN").await?;
-        let value = table.find_value(&version, &pkgarch, &checksum).await?;
-
-        Ok(serde_json::json!({"value": value}))
-    }
-
-    /// Handle test-package request
-    async fn handle_test_package(&self, params: serde_json::Value) -> Result<serde_json::Value> {
-        let version: String = params["version"]
-            .as_str()
-            .ok_or_else(|| ServerError::InvalidRequest("Missing version".to_string()))?
-            .to_string();
-        let pkgarch: String = params["pkgarch"]
-            .as_str()
-            .ok_or_else(|| ServerError::InvalidRequest("Missing pkgarch".to_string()))?
-            .to_string();
-
-        let table = self.get_table("PRMAIN").await?;
-        let exists = table.test_package(&version, &pkgarch).await?;
-
-        Ok(serde_json::json!({"value": exists}))
-    }
-
-    /// Handle max-package-pr request
-    async fn handle_max_package_pr(&self, params: serde_json::Value) -> Result<serde_json::Value> {
-        let version: String = params["version"]
-            .as_str()
-            .ok_or_else(|| ServerError::InvalidRequest("Missing version".to_string()))?
-            .to_string();
-        let pkgarch: String = params["pkgarch"]
-            .as_str()
-            .ok_or_else(|| ServerError::InvalidRequest("Missing pkgarch".to_string()))?
-            .to_string();
-
-        let table = self.get_table("PRMAIN").await?;
-        let value = table.find_max_value(&version, &pkgarch).await?;
-
-        Ok(serde_json::json!({"value": value}))
-    }
-
-    /// Handle import-one request
-    async fn handle_import_one(&self, params: serde_json::Value) -> Result<serde_json::Value> {
-        if self.config.read_only {
-            return Ok(serde_json::json!({"value": null}));
         }
 
-        let version: String = params["version"]
-            .as_str()
-            .ok_or_else(|| ServerError::InvalidRequest("Missing version".to_string()))?
-            .to_string();
-        let pkgarch: String = params["pkgarch"]
-            .as_str()
-            .ok_or_else(|| ServerError::InvalidRequest("Missing pkgarch".to_string()))?
-            .to_string();
-        let checksum: String = params["checksum"]
-            .as_str()
-            .ok_or_else(|| ServerError::InvalidRequest("Missing checksum".to_string()))?
-            .to_string();
-        let value: i64 = params["value"]
-            .as_i64()
-            .ok_or_else(|| ServerError::InvalidRequest("Missing or invalid value".to_string()))?;
-
-        let table = self.get_table("PRMAIN").await?;
-        let result = table
-            .import_one(&version, &pkgarch, &checksum, value)
-            .await?;
-
-        Ok(serde_json::json!({"value": result}))
-    }
-
-    /// Handle export request
-    async fn handle_export(&self, params: serde_json::Value) -> Result<serde_json::Value> {
-        let version = params["version"].as_str();
-        let pkgarch = params["pkgarch"].as_str();
-        let checksum = params["checksum"].as_str();
-        let colinfo = params["colinfo"].as_bool().unwrap_or(false);
-
-        let table = self.get_table("PRMAIN").await?;
-        let (metainfo, datainfo) = table.export(version, pkgarch, checksum, colinfo).await?;
-
-        Ok(serde_json::json!({
-            "metainfo": metainfo,
-            "datainfo": datainfo
-        }))
-    }
-
-    /// Handle is-readonly request
-    async fn handle_is_readonly(&self) -> Result<serde_json::Value> {
-        Ok(serde_json::json!({"readonly": self.config.read_only}))
+        Err(ServerError::InvalidRequest(format!(
+            "Unknown request: {request_line}"
+        )))
     }
 }
 

@@ -1,0 +1,24 @@
+DEBUG: Listening on ('127.0.0.1', 8586)
+2025-09-08 19:46:03,160 Listening on ('127.0.0.1', 8586)
+DEBUG: Opening PRServ database 'file:/mnt/src/jschneck/avocado-linux/prserv/test_python.db'
+2025-09-08 19:46:03,160 Opening PRServ database 'file:/mnt/src/jschneck/avocado-linux/prserv/test_python.db'
+NOTE: Started PRServer with DBfile: /mnt/src/jschneck/avocado-linux/prserv/test_python.db, Address: 127.0.0.1:8586, PID: 4173579
+2025-09-08 19:46:03,161 Started PRServer with DBfile: /mnt/src/jschneck/avocado-linux/prserv/test_python.db, Address: 127.0.0.1:8586, PID: 4173579
+NOTE: [Client ('127.0.0.1', 54954)] Client ('127.0.0.1', 54954) connected
+2025-09-08 19:46:07,405 [Client ('127.0.0.1', 54954)] Client ('127.0.0.1', 54954) connected
+NOTE: [Client ('127.0.0.1', 54954)] Connection closed
+2025-09-08 19:46:08,399 [Client ('127.0.0.1', 54954)] Connection closed
+DEBUG: Client ('127.0.0.1', 54954) disconnected
+2025-09-08 19:46:08,399 Client ('127.0.0.1', 54954) disconnected
+NOTE: [Client ('127.0.0.1', 45652)] Client ('127.0.0.1', 45652) connected
+2025-09-08 19:46:14,519 [Client ('127.0.0.1', 45652)] Client ('127.0.0.1', 45652) connected
+NOTE: [Client ('127.0.0.1', 45652)] Connection closed
+2025-09-08 19:46:14,520 [Client ('127.0.0.1', 45652)] Connection closed
+DEBUG: Client ('127.0.0.1', 45652) disconnected
+2025-09-08 19:46:14,520 Client ('127.0.0.1', 45652) disconnected
+DEBUG: Got exit signal
+2025-09-08 19:46:18,530 Got exit signal
+DEBUG: Stopping server
+2025-09-08 19:46:18,530 Stopping server
+DEBUG: Server shutting down
+2025-09-08 19:46:18,530 Server shutting down
