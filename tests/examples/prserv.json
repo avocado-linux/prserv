@@ -1,0 +1,11 @@
+{
+  "server": {
+    "database": "prserv.db",
+    "bind_addr": "127.0.0.1:8585",
+    "read_only": false,
+    "nohist": false
+  },
+  "client": {
+    "server_addr": "127.0.0.1:8585"
+  }
+}

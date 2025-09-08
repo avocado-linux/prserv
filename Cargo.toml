@@ -1,0 +1,52 @@
+[package]
+name = "prserv"
+version = "0.1.0"
+edition = "2021"
+description = "A Package Revision (PR) server for BitBake builds"
+repository = "https://github.com/avocado-linux/prserv"
+license = "Apache-2.0"
+authors = ["jschneck"]
+keywords = ["bitbake", "prserv", "package-revision", "sqlite", "server"]
+categories = ["command-line-utilities", "database", "network-programming"]
+readme = "README.md"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+clap = { version = "4.5", features = ["derive", "env"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1.35", features = ["full"] }
+reqwest = { version = "0.11", features = ["json", "stream"] }
+futures-util = "0.3"
+indicatif = "0.17"
+directories = "5.0"
+flate2 = "1.0"
+tar = "0.4"
+# Async SQLite support
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "chrono", "uuid"] }
+# UUID generation for request IDs
+uuid = { version = "1.0", features = ["v4"] }
+# Chrono for timestamps
+chrono = { version = "0.4", features = ["serde"] }
+# Async channels for communication
+tokio-util = { version = "0.7", features = ["codec"] }
+# Network utilities
+socket2 = "0.5"
+
+[dev-dependencies]
+assert_cmd = "2.0"
+predicates = "3.0"
+tempfile = "3.10"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
