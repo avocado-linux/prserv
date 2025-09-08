@@ -148,9 +148,7 @@ pub async fn execute(args: Args) -> Result<()> {
             let value = client
                 .max_package_pr(&version, &pkgarch)
                 .await
-                .map_err(|e| {
-                    crate::error::Error::Generic(format!("max-package-pr failed: {e}"))
-                })?;
+                .map_err(|e| crate::error::Error::Generic(format!("max-package-pr failed: {e}")))?;
             match value {
                 Some(v) => println!("Max PR value: {v}"),
                 None => println!("No PR values found"),

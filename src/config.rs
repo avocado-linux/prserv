@@ -1,6 +1,6 @@
 use std::fs;
-use std::path::Path;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -23,7 +23,6 @@ pub enum SyncMode {
     /// Only sync on graceful shutdown (fastest, least safe)
     OnShutdown,
 }
-
 
 impl SyncMode {
     /// Convert to Duration for periodic mode, None for other modes
@@ -62,8 +61,9 @@ impl FromStr for SyncMode {
             "on_shutdown" | "on-shutdown" | "shutdown" => Ok(SyncMode::OnShutdown),
             s if s.starts_with("periodic:") => {
                 let interval_str = s.strip_prefix("periodic:").unwrap();
-                let interval_secs = interval_str.parse::<u64>()
-                    .map_err(|_| Error::Other(format!("Invalid periodic interval: {interval_str}")))?;
+                let interval_secs = interval_str.parse::<u64>().map_err(|_| {
+                    Error::Other(format!("Invalid periodic interval: {interval_str}"))
+                })?;
                 Ok(SyncMode::Periodic { interval_secs })
             }
             _ => Err(Error::Other(format!(
@@ -131,7 +131,6 @@ impl Default for ClientConfig {
         }
     }
 }
-
 
 impl Config {
     /// Loads configuration from the specified file.
@@ -231,9 +230,7 @@ impl Config {
 
         // Validate database path is not empty
         if self.server.database.trim().is_empty() {
-            return Err(Error::Other(
-                "Database path cannot be empty".to_string()
-            ));
+            return Err(Error::Other("Database path cannot be empty".to_string()));
         }
 
         Ok(())
@@ -305,7 +302,10 @@ mod tests {
         assert_eq!(config.server.bind_addr, "0.0.0.0:9999");
         assert!(config.server.read_only);
         assert!(config.server.nohist);
-        assert_eq!(config.server.sync_mode, SyncMode::Periodic { interval_secs: 30 });
+        assert_eq!(
+            config.server.sync_mode,
+            SyncMode::Periodic { interval_secs: 30 }
+        );
         assert_eq!(config.client.server_addr, "192.168.1.100:8585");
 
         // Clean up
@@ -319,12 +319,30 @@ mod tests {
 
     #[test]
     fn test_sync_mode_parsing() {
-        assert_eq!(SyncMode::from_str("immediate").unwrap(), SyncMode::Immediate);
-        assert_eq!(SyncMode::from_str("on_shutdown").unwrap(), SyncMode::OnShutdown);
-        assert_eq!(SyncMode::from_str("on-shutdown").unwrap(), SyncMode::OnShutdown);
-        assert_eq!(SyncMode::from_str("shutdown").unwrap(), SyncMode::OnShutdown);
-        assert_eq!(SyncMode::from_str("periodic:5").unwrap(), SyncMode::Periodic { interval_secs: 5 });
-        assert_eq!(SyncMode::from_str("periodic:300").unwrap(), SyncMode::Periodic { interval_secs: 300 });
+        assert_eq!(
+            SyncMode::from_str("immediate").unwrap(),
+            SyncMode::Immediate
+        );
+        assert_eq!(
+            SyncMode::from_str("on_shutdown").unwrap(),
+            SyncMode::OnShutdown
+        );
+        assert_eq!(
+            SyncMode::from_str("on-shutdown").unwrap(),
+            SyncMode::OnShutdown
+        );
+        assert_eq!(
+            SyncMode::from_str("shutdown").unwrap(),
+            SyncMode::OnShutdown
+        );
+        assert_eq!(
+            SyncMode::from_str("periodic:5").unwrap(),
+            SyncMode::Periodic { interval_secs: 5 }
+        );
+        assert_eq!(
+            SyncMode::from_str("periodic:300").unwrap(),
+            SyncMode::Periodic { interval_secs: 300 }
+        );
 
         // Test invalid inputs
         assert!(SyncMode::from_str("invalid").is_err());

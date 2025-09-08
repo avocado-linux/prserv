@@ -7,8 +7,12 @@
 use crate::buffered_writes::{BufferedWriteManager, PendingWrite};
 use crate::config::SyncMode;
 use serde::{Deserialize, Serialize};
-use sqlx::{sqlite::SqlitePool, Row};
+use sqlx::{
+    sqlite::{SqliteConnectOptions, SqlitePool},
+    Row,
+};
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::Arc;
 use thiserror::Error;
 use tracing::{debug, error, info};
@@ -610,7 +614,15 @@ impl PrDatabase {
 
         info!("Opening PR database: {}", database_url);
 
-        let pool = SqlitePool::connect(&database_url).await?;
+        // Use SqliteConnectOptions to ensure database file is created if it doesn't exist
+        let pool = if read_only {
+            // For read-only mode, don't create the file if it doesn't exist
+            SqlitePool::connect(&database_url).await?
+        } else {
+            // For read-write mode, create the file if it doesn't exist
+            let options = SqliteConnectOptions::from_str(&database_url)?.create_if_missing(true);
+            SqlitePool::connect_with(options).await?
+        };
 
         // Configure SQLite for immediate persistence and performance
         if !read_only {
