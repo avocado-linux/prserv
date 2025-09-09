@@ -662,6 +662,15 @@ impl PrDatabase {
         .await
     }
 
+    /// Flush any buffered writes to ensure data persistence
+    #[allow(dead_code)]
+    pub async fn flush(&self) -> Result<()> {
+        // For now, this is a no-op since the PrDatabase doesn't directly manage
+        // buffered writes. The buffering is handled at the PrTable level.
+        // In a more complete implementation, we might track all tables and flush them.
+        Ok(())
+    }
+
     /// Close the database connection
     #[allow(dead_code)]
     pub async fn close(self) {

@@ -10,8 +10,8 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::RwLock;
-use tracing::{debug, error, info};
+use tokio::sync::{broadcast, RwLock};
+use tracing::{debug, error, info, warn};
 
 #[derive(Error, Debug)]
 pub enum ServerError {
@@ -85,22 +85,88 @@ impl PrServer {
             self.config.db_path, self.config.read_only, self.config.nohist, self.config.sync_mode
         );
 
-        loop {
-            match listener.accept().await {
-                Ok((stream, addr)) => {
-                    debug!("New client connection from {}", addr);
-                    let server = self.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = server.handle_client(stream, addr).await {
-                            error!("Error handling client {}: {}", addr, e);
-                        }
-                    });
+        // Create shutdown channel
+        let (shutdown_tx, mut shutdown_rx) = broadcast::channel(1);
+
+        // Spawn signal handler task
+        let shutdown_tx_clone = shutdown_tx.clone();
+        tokio::spawn(async move {
+            let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("Failed to register SIGTERM handler");
+            let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                .expect("Failed to register SIGINT handler");
+
+            tokio::select! {
+                _ = sigterm.recv() => {
+                    info!("Received SIGTERM, initiating graceful shutdown...");
                 }
-                Err(e) => {
-                    error!("Failed to accept connection: {}", e);
+                _ = sigint.recv() => {
+                    info!("Received SIGINT (Ctrl-C), initiating graceful shutdown...");
+                }
+            }
+
+            let _ = shutdown_tx_clone.send(());
+        });
+
+        loop {
+            tokio::select! {
+                // Handle new connections
+                result = listener.accept() => {
+                    match result {
+                        Ok((stream, addr)) => {
+                            debug!("New client connection from {}", addr);
+                            let server = self.clone();
+                            let mut client_shutdown_rx = shutdown_tx.subscribe();
+                            tokio::spawn(async move {
+                                tokio::select! {
+                                    result = server.handle_client(stream, addr) => {
+                                        if let Err(e) = result {
+                                            error!("Error handling client {}: {}", addr, e);
+                                        }
+                                    }
+                                    _ = client_shutdown_rx.recv() => {
+                                        debug!("Client {} connection terminated due to shutdown", addr);
+                                    }
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            error!("Failed to accept connection: {}", e);
+                        }
+                    }
+                }
+                // Handle shutdown signal
+                _ = shutdown_rx.recv() => {
+                    info!("Shutdown signal received, stopping server...");
+                    break;
                 }
             }
         }
+
+        // Perform cleanup
+        self.shutdown().await?;
+        info!("Server shutdown complete");
+        Ok(())
+    }
+
+    /// Perform graceful shutdown cleanup
+    async fn shutdown(&self) -> Result<()> {
+        info!("Performing graceful shutdown cleanup...");
+
+        // Flush any buffered writes from all cached tables
+        {
+            let tables = self.tables.read().await;
+            for (table_name, table) in tables.iter() {
+                if let Err(e) = table.flush().await {
+                    warn!("Error flushing table '{}' during shutdown: {}", table_name, e);
+                } else {
+                    debug!("Successfully flushed table '{}'", table_name);
+                }
+            }
+        }
+
+        info!("Graceful shutdown cleanup complete");
+        Ok(())
     }
 
     /// Get or create a table instance
