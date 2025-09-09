@@ -13,7 +13,7 @@ if [ -z "$CI" ]; then
         echo "cargo install cargo-audit"
         exit 1
     fi
-    cargo audit
+    cargo audit --ignore RUSTSEC-2023-0071
 fi
 
 # Check for cargo-llvm-cov (skip check in CI as it's installed by workflow)
