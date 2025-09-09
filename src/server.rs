@@ -91,10 +91,12 @@ impl PrServer {
         // Spawn signal handler task
         let shutdown_tx_clone = shutdown_tx.clone();
         tokio::spawn(async move {
-            let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("Failed to register SIGTERM handler");
-            let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-                .expect("Failed to register SIGINT handler");
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("Failed to register SIGTERM handler");
+            let mut sigint =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                    .expect("Failed to register SIGINT handler");
 
             tokio::select! {
                 _ = sigterm.recv() => {
@@ -158,7 +160,10 @@ impl PrServer {
             let tables = self.tables.read().await;
             for (table_name, table) in tables.iter() {
                 if let Err(e) = table.flush().await {
-                    warn!("Error flushing table '{}' during shutdown: {}", table_name, e);
+                    warn!(
+                        "Error flushing table '{}' during shutdown: {}",
+                        table_name, e
+                    );
                 } else {
                     debug!("Successfully flushed table '{}'", table_name);
                 }

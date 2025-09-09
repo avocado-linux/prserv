@@ -211,10 +211,10 @@ impl PrTable {
             self.table_name
         );
 
-        let result = sqlx::query_scalar::<_, i64>(&sql)
+        let result = sqlx::query_scalar::<_, Option<i64>>(&sql)
             .bind(version)
             .bind(pkgarch)
-            .fetch_optional(&self.pool)
+            .fetch_one(&self.pool)
             .await?;
 
         Ok(result)
@@ -289,23 +289,8 @@ impl PrTable {
 
     /// Get value in no-history mode (no decrements allowed)
     async fn get_value_no_hist(&self, version: &str, pkgarch: &str, checksum: &str) -> Result<i64> {
-        // Find existing value that is >= max value for this version/pkgarch
-        let sql = format!(
-            "SELECT value FROM {}
-             WHERE version=? AND pkgarch=? AND checksum=? AND
-             value >= COALESCE((SELECT max(value) FROM {} WHERE version=? AND pkgarch=?), 0)",
-            self.table_name, self.table_name
-        );
-
-        if let Some(value) = sqlx::query_scalar::<_, i64>(&sql)
-            .bind(version)
-            .bind(pkgarch)
-            .bind(checksum)
-            .bind(version)
-            .bind(pkgarch)
-            .fetch_optional(&self.pool)
-            .await?
-        {
+        // First try to find existing value for exact match
+        if let Some(value) = self.find_value(version, pkgarch, checksum).await? {
             return Ok(value);
         }
 
@@ -675,5 +660,145 @@ impl PrDatabase {
     #[allow(dead_code)]
     pub async fn close(self) {
         self.pool.close().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn test_version_increment_different_checksums() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test_increment.db");
+
+        // Create database with history mode (allows increments)
+        let database = PrDatabase::new(&db_path, false, false, SyncMode::Immediate)
+            .await
+            .unwrap();
+        let table = database.get_table("TEST_INCREMENT_TABLE").await.unwrap();
+
+        let version = "1.0.0";
+        let pkgarch = "x86_64";
+
+        // First request: new package with checksum1 should get PR value 0
+        let checksum1 = "abc123def456";
+        let pr_value1 = table.get_value(version, pkgarch, checksum1).await.unwrap();
+        assert_eq!(pr_value1, 0, "First checksum should get PR value 0");
+
+        // Second request: same package/arch but different checksum should get PR value 1
+        let checksum2 = "789xyz012abc";
+        let pr_value2 = table.get_value(version, pkgarch, checksum2).await.unwrap();
+        assert_eq!(
+            pr_value2, 1,
+            "Different checksum should get incremented PR value"
+        );
+
+        // Third request: another different checksum should get PR value 2
+        let checksum3 = "fedcba987654";
+        let pr_value3 = table.get_value(version, pkgarch, checksum3).await.unwrap();
+        assert_eq!(pr_value3, 2, "Third checksum should get PR value 2");
+
+        // Requesting the same checksum again should return the same PR value
+        let pr_value1_again = table.get_value(version, pkgarch, checksum1).await.unwrap();
+        assert_eq!(
+            pr_value1_again, 0,
+            "Same checksum should return same PR value"
+        );
+
+        let pr_value2_again = table.get_value(version, pkgarch, checksum2).await.unwrap();
+        assert_eq!(
+            pr_value2_again, 1,
+            "Same checksum should return same PR value"
+        );
+
+        // Test with different architecture - should start from 0 again
+        let different_arch = "aarch64";
+        let pr_value_diff_arch = table
+            .get_value(version, different_arch, checksum1)
+            .await
+            .unwrap();
+        assert_eq!(
+            pr_value_diff_arch, 0,
+            "Different architecture should start from 0"
+        );
+
+        // Test with different version - should start from 0 again
+        let different_version = "2.0.0";
+        let pr_value_diff_version = table
+            .get_value(different_version, pkgarch, checksum1)
+            .await
+            .unwrap();
+        assert_eq!(
+            pr_value_diff_version, 0,
+            "Different version should start from 0"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_find_value_existing_entries() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test_find.db");
+
+        let database = PrDatabase::new(&db_path, false, false, SyncMode::Immediate)
+            .await
+            .unwrap();
+        let table = database.get_table("TEST_FIND_TABLE").await.unwrap();
+
+        let version = "1.0.0";
+        let pkgarch = "x86_64";
+        let checksum = "test_checksum";
+
+        // Initially should find nothing
+        let initial_find = table.find_value(version, pkgarch, checksum).await.unwrap();
+        assert_eq!(initial_find, None, "Should find no value initially");
+
+        // Create an entry
+        let pr_value = table.get_value(version, pkgarch, checksum).await.unwrap();
+        assert_eq!(pr_value, 0, "First entry should get PR value 0");
+
+        // Now find_value should return the created value
+        let found_value = table.find_value(version, pkgarch, checksum).await.unwrap();
+        assert_eq!(found_value, Some(0), "Should find the created value");
+
+        // find_max_value should also work
+        let max_value = table.find_max_value(version, pkgarch).await.unwrap();
+        assert_eq!(max_value, Some(0), "Max value should be 0");
+    }
+
+    #[tokio::test]
+    async fn test_nohist_mode_behavior() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test_nohist.db");
+
+        // Create database with nohist=true (no decrements allowed)
+        let database = PrDatabase::new(&db_path, true, false, SyncMode::Immediate)
+            .await
+            .unwrap();
+        let table = database.get_table("TEST_NOHIST_TABLE").await.unwrap();
+
+        let version = "1.0.0";
+        let pkgarch = "x86_64";
+
+        // First checksum should get PR value 0
+        let checksum1 = "checksum1";
+        let pr_value1 = table.get_value(version, pkgarch, checksum1).await.unwrap();
+        assert_eq!(pr_value1, 0, "First checksum in nohist mode should get 0");
+
+        // Different checksum should get incremented value
+        let checksum2 = "checksum2";
+        let pr_value2 = table.get_value(version, pkgarch, checksum2).await.unwrap();
+        assert_eq!(
+            pr_value2, 1,
+            "Different checksum in nohist mode should increment"
+        );
+
+        // Same checksum should return same value
+        let pr_value1_again = table.get_value(version, pkgarch, checksum1).await.unwrap();
+        assert_eq!(
+            pr_value1_again, 0,
+            "Same checksum should return same value in nohist mode"
+        );
     }
 }
