@@ -8,3 +8,4 @@ jobs:
   checks:
     name: Run Checks
     uses: ./.github/workflows/checks.yml
+    secrets: inherit

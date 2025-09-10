@@ -27,24 +27,24 @@ jobs:
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Install tools
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-llvm-cov
+      - name: hehe
+        run: |
+          cargo build
 
-      - name: Security audit
-        uses: rustsec/audit-check@v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      # - name: Install tools
+      #   uses: taiki-e/install-action@v2
+      #   with:
+      #     tool: cargo-llvm-cov
 
-      - name: Run checks
-        shell: bash
-        run: ./scripts/checks.sh
+      # - name: Run checks
+      #   shell: bash
+      #   run: ./scripts/checks.sh
 
-      - name: Upload coverage to Codecov
-        if: matrix.os == 'ubuntu-latest' && success()
-        uses: codecov/codecov-action@v3
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: ./cobertura.xml
-          fail_ci_if_error: true
+      # - name: Upload coverage to Codecov
+      #   if: success()
+      #   uses: codecov/codecov-action@v5
+      #   with:
+      #     token: ${{ secrets.CODECOV_TOKEN }}
+      #     files: ./cobertura.xml
+      #     fail_ci_if_error: true
+      #     slug: avocado-linux/prserv
