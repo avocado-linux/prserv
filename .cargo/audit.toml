@@ -1,0 +1,10 @@
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071: Marvin attack in rsa crate False positive - we use sqlx with sqlite only,
+    # not mysql. The rsa crate is a transitive dependency of sqlx-mysql which isn't compiled or
+    # linked in our build. This is due to a long-standing Cargo bug where lockfiles include all
+    # workspace dependencies regardless of enabled features
+    # (https://github.com/rust-lang/cargo/issues/10801). The vulnerability does not affect our
+    # binary since the code path is never compiled.
+    "RUSTSEC-2023-0071",
+]
